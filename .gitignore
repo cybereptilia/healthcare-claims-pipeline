@@ -1,0 +1,12 @@
+# Python cache
+--pycache__/
+*.pyc
+
+# Generated pipeline data
+data/raw/*.csv
+data/clean/*.csv
+
+# OS noise
+.DS_Store
+Thumbs.db
+
