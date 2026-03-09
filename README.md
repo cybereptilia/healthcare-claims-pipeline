@@ -53,21 +53,26 @@ REVERSED - 4.3%
 - Monthly claim payments range roughly between $600k-$700k, with lower totals in partial months.
 - Provider denial rates are calculated with minimum claim thersholds to avoid misleading results from low sample sizes.
 
-Project Structure
+## Project Structure
 
-python/
-  generate_raw_data.py
-  clean_transform.py
-  load_to_postgres.py
-
-sql/
-  001_schema.sql
-  002_indexes.sql
-  010_analytics_views.sql
-  011_quality_checks.sql
-  020_report_queries.sql
-
-run_all.ps1
+```
+healthcare-claims-pipeline
+│
+├── python
+│   ├── generate_raw_data.py
+│   ├── clean_transform.py
+│   └── load_to_postgres.py
+│
+├── sql
+│   ├── 001_schema.sql
+│   ├── 002_indexes.sql
+│   ├── 010_analytics_views.sql
+│   ├── 011_quality_checks.sql
+│   └── 020_report_queries.sql
+│
+├── run_all.ps1
+└── README.md
+```
 
 Concepts Demonstrated
 - ETL pipeline design
