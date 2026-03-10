@@ -1,4 +1,4 @@
-Healthcare Claims Data Pipeline
+## Healthcare Claims Data Pipeline
 
 An end-to-end data pipeline that generates synthetic healthcare claims data, cleans and validates it, loads it into PostgreSQL, and produces analytics-ready reports.
 The project demonstrates core data engineering concepts including data cleaning, validation, database loading, indexing, analytics views, and automated pipeline execution.
@@ -14,7 +14,7 @@ Libraries:
 - csv
 - pathlib
 
-Pipeline Overview
+## Pipeline Overview
 The pipeline runs through the following stages:
 1. Generate synthetic raw healthcare claims data
 2. Clean and validate the data 
@@ -25,10 +25,10 @@ The pipeline runs through the following stages:
 7. Produce summary reports
 - All steps run with one command
 
-Running the Pipeline
+## Running the Pipeline
 .\run_all.ps1
 
-This script:
+# This script:
 - Ensures the database exists
 - Builds schema
 - Generates raw claims data
@@ -37,19 +37,19 @@ This script:
 - Creates analytics views 
 - Runs quality checks and reports
 
-Example output:
+# Example output:
 
 Raw rows: 20,000
 Clean rows: 17,704
 Rejected rows: 2,296
 
-Example Insights
+# Example Insights
 Status distribution:
 
-PAID - 77.8%
-DENIED - 12.1%
-PENDED - 5.8%
-REVERSED - 4.3%
+- PAID - 77.8%
+- DENIED - 12.1%
+- PENDED - 5.8%
+- REVERSED - 4.3%
 - Monthly claim payments range roughly between $600k-$700k, with lower totals in partial months.
 - Provider denial rates are calculated with minimum claim thersholds to avoid misleading results from low sample sizes.
 
@@ -74,14 +74,14 @@ healthcare-claims-pipeline
 └── README.md
 ```
 
-Concepts Demonstrated
+## Concepts Demonstrated
 - ETL pipeline design
 - Data validation and rejection handling
 - PostgreSQL schema and indexing
 - SQL analytics views
 - Automated pipeline execution
 
-Author 
-Rosaliz Garcia
-Computer Science - Data Science Track
+# Author 
+# Rosaliz Garcia
+# Computer Science - Data Science Track
 
