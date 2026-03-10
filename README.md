@@ -81,7 +81,7 @@ healthcare-claims-pipeline
 - SQL analytics views
 - Automated pipeline execution
 
-# Author 
-# Rosaliz Garcia
-# Computer Science - Data Science Track
+Author 
+Rosaliz Garcia
+Computer Science - Data Science Track
 
