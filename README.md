@@ -39,9 +39,9 @@ The pipeline runs through the following stages:
 
 # Example output:
 
-Raw rows: 20,000
-Clean rows: 17,704
-Rejected rows: 2,296
+- Raw rows: 20,000
+- Clean rows: 17,704
+- Rejected rows: 2,296
 
 # Example Insights
 Status distribution:
