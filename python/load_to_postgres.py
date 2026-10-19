@@ -345,7 +345,7 @@ def main() -> None:
 
         # 11) Commit the transaction
         conn.commit()
-        print("[Load] Commit successful. Run {run_id} marked SUCCESS.")
+        print(f"[Load] Commit successful. Run {run_id} marked SUCCESS.")
     
     except Exception as exc:
         # Rollback on any failure, and record why the run failed
