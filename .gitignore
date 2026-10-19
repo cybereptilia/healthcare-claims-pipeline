@@ -2,6 +2,10 @@
 --pycache__/
 *.pyc
 
+# Virtual environment
+.venv/
+venv/
+
 # Generated pipeline data
 data/raw/*.csv
 data/clean/*.csv

@@ -43,7 +43,9 @@ ORDER BY denial_rate DESC NULLS LAST, total_claims DESC;
 
 -- -------------------------------------------------------------------------------
 -- View 2b (filtered): Denial rate by provider with a minimum sample size
--- Tweak the threshold depending on your dataset size (30 is a decent default in this case).
+-- Threshold: 5 claims (matches Reports 4 and 5 in 020_report_queries.sql).
+-- With the current generator every provider has 20+ claims, so this filter is a 
+-- safeguard for future data; raise it if you shrink N_ROWS or grow N_PROVIDERS.
 -- -------------------------------------------------------------------------------
 CREATE VIEW v_denial_rate_by_provider_min5 AS
 SELECT
@@ -69,7 +71,8 @@ ORDER BY n_claims DESC, avg_paid DESC;
 -- --------------------------------------------------------------------------------
 -- View 3b (Filtered): Avg paid by CPT with a minimum sample size 
 -- Why: this prevents averages based on tiny samples (like n_claims = 4).
--- Tweak threshold depending on dataset size (50 is a proficient default in this case).
+-- Threshold: 10 claims. With the 20-code CPT catalog in generate_raw_data.py,
+-- every code has 300+ claims; raise it if you add rare codes to the catalog.
 -- --------------------------------------------------------------------------------
 CREATE OR REPLACE VIEW v_avg_paid_by_cpt_min10 AS
 SELECT 

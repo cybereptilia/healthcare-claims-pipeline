@@ -1,4 +1,6 @@
--- 002_portfolio_upgrade.sql
+-- 003_portfolio_upgrade.sql
+-- Run AFTER 001_schema.sql and 002_indexes.sql:
+-- psql -U postgres -d healthcare_claims -f sql/003_portfolio_upgrade.sql
 -- Adds rejects table, run logging table, and first-class data quality constraints.
 
 BEGIN;

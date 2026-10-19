@@ -1,4 +1,9 @@
+# Data pipeline (python/)
 psycopg2-binary>=2.9
 pandas>=2.0
 numpy>=1.26
 faker>=25.0
+
+# ML stage (ml/)
+scikit-learn>=1.4
+matplotlib>=3.8
