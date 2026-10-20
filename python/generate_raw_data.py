@@ -29,6 +29,8 @@ between providers.
 paid > allowed, unknown status, invalid state), so every reject 
 rule in clean_transform.py gets exercised, not only the 
 "missing field" rule.
+- Only PAID claims have a paid amount above zero. DENIED, PENDED, and 
+  REVERSED claims are generated with paid = 0.00.
 """
 
 from __future__ import annotations # This will allow future-style hints on older python versions 
@@ -126,7 +128,7 @@ class Provider(TypedDict):
     volume_weight: float    # relative claim volume (higher = more claims)
     high_denial: bool       # True = denies claims more often than average
 
-    
+
 # --------------------------------------------------------------------
 # Helper functions
 # --------------------------------------------------------------------
@@ -291,6 +293,16 @@ def generate_claim_row(claim_id: int, providers: list[Provider]) -> dict[str, st
     billed = round(random.uniform(billed_min, billed_max), 2)
     allowed = round(billed * random.uniform(0.50, 0.95), 2)
     paid = round(allowed * random.uniform(0.00, 1.00), 2)
+
+    # Only PAID claims have money paid out:
+    # - DENIED:   the payer refused the claim -> nothing paid
+    # - PENDED:   still under review, not paid yet
+    # - REVERSED: the payment was taken back -> net paid is zero
+    # We still draw the random number above for every row and THEN override it.
+    # Skipping the draw would shift every later random call, so all other
+    # fields (states, dates, rule violations, ...) would change too.
+    if status != "PAID":
+        paid = 0.00
 
     billed_str = messy_money(billed)
     allowed_str = messy_money(allowed)
