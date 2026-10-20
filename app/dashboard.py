@@ -10,6 +10,10 @@ Data sources (all created by run_all.ps1):
     - v_claims_base  (sql/012_dashboard_views.sql): one row per clean claim.
       Every chart that respects the sidebar filters reads from this view.
     - v_latest_run   (sql/012_dashboard_views.sql): the most recent SUCCESS run.
+    - v_rejects_by_reason_latest, v_missing_fields_latest (sql/012): rejects
+      of that run, by reason and by missing field.
+    - pipeline_runs  (sql/003_portfolio_upgrade.sql): one row per pipeline run.
+    - claims_clean   (sql/001_schema.sql): read directly by the live checks.
 
 Prerequisites:
     1) Run the pipeline so the views exist:   .\\run_all.ps1 -SkipML
@@ -21,9 +25,9 @@ Prerequisites:
 How to run (from repo root):
     streamlit run app/dashboard.py
 
-Build status:
-    Done:    connection, sidebar filters, Overview, Payments, and Providers tabs.
-    Planned: Procedures & Diagnoses and Data Quality tabs.
+Tabs:
+    Overview, Payments, Providers, Procedures & Diagnoses  (respond to the sidebar filters)
+    Data Quality                                         (whole pipeline run, not filtered)
 """
 
 from __future__ import annotations
@@ -68,6 +72,57 @@ REFERENCE_COLOR: str = "#83858f"
 
 # Providers tab: denial rate at or above this counts as "high-denial".
 HIGH_DENIAL_THRESHOLD_PCT: float = 20.0
+
+# Short, plain-language labels for the codes the generator uses, so charts
+# show "45378 · Colonoscopy" instead of a bare number. These are our own
+# summaries for display, not official code descriptions.
+# (A reference table in PostgreSQL would be the next step if the code list grows.)
+CPT_LABELS: dict[str, str] = {
+    "99213": "Office visit, established patient (lvl 3)",
+    "99214": "Office visit, established patient (lvl 4)",
+    "99203": "Office visit, new patient (lvl 3)",
+    "99204": "Office visit, new patient (lvl 4)",
+    "80053": "Comprehensive metabolic panel",
+    "85025": "Complete blood count",
+    "36415": "Blood draw",
+    "81002": "Urinalysis",
+    "87880": "Rapid strep test",
+    "90686": "Flu vaccine",
+    "93000": "Electrocardiogram (ECG)",
+    "97110": "Physical therapy exercises",
+    "90837": "Psychotherapy, 60 min",
+    "71046": "Chest X-ray",
+    "70450": "CT scan, head",
+    "73721": "MRI, leg joint",
+    "99285": "Emergency visit, high severity",
+    "99232": "Hospital visit, follow-up",
+    "20610": "Joint injection, large joint",
+    "45378": "Colonoscopy",
+}
+DX_LABELS: dict[str, str] = {
+    "E11.9": "Type 2 diabetes",
+    "I10": "High blood pressure",
+    "J45.909": "Asthma",
+    "M54.5": "Low back pain",
+    "F41.9": "Anxiety disorder",
+    "K21.9": "Acid reflux (GERD)",
+}
+
+# Plain-language names for the reject reasons written by clean_transform.py.
+REJECT_REASON_LABELS: dict[str, str] = {
+    "missing_required_fields": "Missing required field(s)",
+    "invalid_status": "Invalid status",
+    "amount_order_violation_paid_allowed_billed": "Paid > allowed or allowed > billed",
+    "invalid_state": "Invalid state code",
+    "negative_amount": "Negative amount",
+}
+
+# Status labels for the run log. Icon + word, so the status never relies on color.
+RUN_STATUS_LABELS: dict[str, str] = {
+    "SUCCESS": "✅ SUCCESS",
+    "FAILED": "❌ FAILED",
+    "STARTED": "⏳ STARTED",
+}
 
 # Colors for charts that compare billed / allowed / paid on one shared $ axis.
 # Fixed order (blue, orange, aqua = slots 1-3 of the reference palette), so
@@ -466,9 +521,13 @@ def bar_chart(
     title: str,
     value_title: str,
     tooltip: list[alt.Tooltip],
+    value_format: str | None = None,
 ) -> alt.Chart:
     """
     Horizontal single-series bar chart, sorted largest first.
+
+    value_format: optional d3 number format for the value axis,
+    e.g. "$,.0f" for dollars. None keeps Altair's default.
 
     Why horizontal: category names (statuses, states, reasons) stay readable
     without rotated labels. Mark details follow the project's chart rules:
@@ -479,7 +538,16 @@ def bar_chart(
         alt.Chart(df, title=title)
         .mark_bar(color=ACCENT_COLOR, cornerRadiusEnd=4, size=18)
         .encode(
-            x=alt.X(f"{value}:Q", title=value_title, axis=alt.Axis(grid=True, tickCount=5)),
+            x=alt.X(
+                f"{value}:Q",
+                title=value_title,
+                # alt.Undefined = "not set": Altair rejects format=None.
+                axis=alt.Axis(
+                    grid=True,
+                    tickCount=5,
+                    format=value_format if value_format else alt.Undefined,
+                ),
+            ),
             y=alt.Y(f"{category}:N", sort="-x", title=None, axis=alt.Axis(labelLimit=250)),
             tooltip=tooltip,
         )
@@ -875,6 +943,327 @@ def render_providers(filters: Filters) -> None:
 
 
 # -----------------------------------------------------------------
+# Tab: Procedures & Diagnoses
+# -----------------------------------------------------------------
+# The measures a reader can rank codes by: label -> (column, axis title, axis format)
+CODE_MEASURES: dict[str, tuple[str, str, str | None]] = {
+    "Average paid per claim": ("avg_paid", "Average paid per claim ($)", "$,.0f"),
+    "Claims": ("n_claims", "Claims", None),
+    "Denial rate": ("denial_rate_pct", "Denial rate (%)", None),
+}
+
+
+def render_code_breakdown(
+    filters: Filters,
+    code_column: str,
+    labels: dict[str, str],
+    heading: str,
+    noun: str,
+    key: str,
+) -> None:
+    """
+    One section of the tab: claims grouped by a code column (CPT or dx),
+    ranked by the measure the reader picks.
+
+    code_column comes from the two fixed calls in render_procedures_diagnoses(),
+    never from user input, so placing it in the SQL text is safe. Filter
+    VALUES still go in as bind parameters.
+    """
+    where, params = filter_clause(filters)
+
+    st.subheader(heading)
+    measure_label = st.radio(
+        "Rank by",
+        options=list(CODE_MEASURES),
+        horizontal=True,
+        key=key,
+    )
+    value, value_title, value_format = CODE_MEASURES[measure_label]
+
+    codes = run_query(
+        f"""
+        SELECT
+            {code_column}              AS code,
+            COUNT(*)                   AS n_claims,
+            AVG(paid_amount)           AS avg_paid,
+            AVG(billed_amount)         AS avg_billed,
+            100.0 * AVG(is_denied)     AS denial_rate_pct,
+            SUM(paid_amount)           AS total_paid
+        FROM v_claims_base
+        {where}
+        GROUP BY {code_column}
+        """,
+        params,
+    )
+    if codes.empty:
+        st.warning("No claims match the current filters.")
+        return
+
+    # NUMERIC averages and sums arrive as Decimal; convert for charts.
+    for col in ["avg_paid", "avg_billed", "denial_rate_pct", "total_paid"]:
+        codes[col] = codes[col].astype(float).round(2)
+    # "45378 · Colonoscopy". Unknown codes (if the generator changes) show alone.
+    codes["label"] = [
+        f"{c} · {labels[c]}" if c in labels else str(c) for c in codes["code"]
+    ]
+
+    st.altair_chart(
+        bar_chart(
+            codes,
+            category="label",
+            value=value,
+            title=f"{measure_label} by {noun}",
+            value_title=value_title,
+            value_format=value_format,
+            tooltip=[
+                alt.Tooltip("label:N", title="Code"),
+                alt.Tooltip("n_claims:Q", title="Claims", format=","),
+                alt.Tooltip("avg_billed:Q", title="Avg billed", format="$,.2f"),
+                alt.Tooltip("avg_paid:Q", title="Avg paid", format="$,.2f"),
+                alt.Tooltip("denial_rate_pct:Q", title="Denial rate (%)", format=".2f"),
+            ],
+        ),
+        width="stretch",
+    )
+
+    with st.expander("Show the numbers as a table"):
+        show_table(
+            codes.sort_values(value, ascending=False)[
+                ["label", "n_claims", "avg_billed", "avg_paid",
+                 "denial_rate_pct", "total_paid"]
+            ],
+            {
+                "label": st.column_config.TextColumn("Code"),
+                "n_claims": count_column("Claims"),
+                "avg_billed": money_column("Avg billed"),
+                "avg_paid": money_column("Avg paid"),
+                "denial_rate_pct": pct_column("Denial rate"),
+                "total_paid": money_column("Total paid"),
+            },
+        )
+
+
+def render_procedures_diagnoses(filters: Filters) -> None:
+    """
+    What is being billed and paid: claims grouped by procedure (CPT) and by
+    diagnosis (ICD-10 dx code).
+    """
+    st.caption(
+        "Average paid per claim includes every selected claim, so DENIED, "
+        "PENDED, and REVERSED claims count as \\$0. Remove them in the status "
+        "filter to see the average paid on PAID claims only."
+    )
+    render_code_breakdown(
+        filters,
+        code_column="cpt_code",
+        labels=CPT_LABELS,
+        heading="Procedures (CPT)",
+        noun="procedure",
+        key="cpt_measure",
+    )
+    st.divider()
+    render_code_breakdown(
+        filters,
+        code_column="dx_code",
+        labels=DX_LABELS,
+        heading="Diagnoses (ICD-10)",
+        noun="diagnosis",
+        key="dx_measure",
+    )
+    # True by design of python/generate_raw_data.py, not a finding about the data:
+    # the generator picks the dx code at random, independent of the procedure.
+    st.caption(
+        "In this synthetic dataset, each claim's diagnosis is picked at random, "
+        "independent of the procedure and amounts, so the six diagnoses look "
+        "nearly the same on every measure. Real claims would differ by diagnosis."
+    )
+
+
+# -----------------------------------------------------------------
+# Tab: Data Quality
+# -----------------------------------------------------------------
+def render_data_quality() -> None:
+    """
+    How clean the loaded data is: reconciliation and rejects of the latest
+    successful run, live checks on claims_clean, and the run history.
+
+    Not affected by the sidebar filters: rejects are rows that never became
+    clean claims, so they have no trustworthy date, state, or status to filter by.
+    """
+    st.caption(
+        "This tab describes the whole pipeline run and ignores the sidebar filters."
+    )
+
+    run = run_query(
+        "SELECT raw_rows, clean_rows, rejected_rows, reject_rate_pct FROM v_latest_run"
+    )
+    if run.empty:
+        st.info("No successful pipeline run found. Run `.\\run_all.ps1 -SkipML` first.")
+        return
+    r = run.iloc[0]
+    raw_rows = int(r["raw_rows"])
+    clean_rows = int(r["clean_rows"])
+    rejected_rows = int(r["rejected_rows"])
+
+    # ---- KPI row: reconciliation ---------------------------------------------------
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Raw rows", f"{raw_rows:,}")
+    col2.metric("Clean rows", f"{clean_rows:,}")
+    col3.metric("Rejected rows", f"{rejected_rows:,}")
+    col4.metric("Reject rate", f"{float(r['reject_rate_pct']):.2f}%")
+
+    # The loader refuses to finish unless raw = clean + rejected; showing it here
+    # lets a reader confirm no row was lost without opening the code.
+    if raw_rows == clean_rows + rejected_rows:
+        st.success(
+            f"✅ Reconciled: {raw_rows:,} raw = {clean_rows:,} clean + "
+            f"{rejected_rows:,} rejected. No row was lost."
+        )
+    else:
+        st.error(
+            f"❌ Not reconciled: {raw_rows:,} raw ≠ {clean_rows:,} clean + "
+            f"{rejected_rows:,} rejected."
+        )
+
+    # ---- Rejects by reason and missing fields -------------------------------------
+    left, right = st.columns(2)
+
+    reasons = run_query(
+        "SELECT reason_category, n_rejects, pct_of_rejects FROM v_rejects_by_reason_latest"
+    )
+    reasons["pct_of_rejects"] = reasons["pct_of_rejects"].astype(float)
+    reasons["reason"] = [
+        REJECT_REASON_LABELS.get(c, c) for c in reasons["reason_category"]
+    ]
+    with left:
+        st.altair_chart(
+            bar_chart(
+                reasons,
+                category="reason",
+                value="n_rejects",
+                title="Rejects by reason",
+                value_title="Rejected rows",
+                tooltip=[
+                    alt.Tooltip("reason:N", title="Reason"),
+                    alt.Tooltip("n_rejects:Q", title="Rejected rows", format=","),
+                    alt.Tooltip("pct_of_rejects:Q", title="% of rejects", format=".2f"),
+                ],
+            ),
+            width="stretch",
+        )
+
+    missing = run_query(
+        "SELECT field_name, n_rejects, pct_of_missing_rejects FROM v_missing_fields_latest"
+    )
+    missing["pct_of_missing_rejects"] = missing["pct_of_missing_rejects"].astype(float)
+    with right:
+        st.altair_chart(
+            bar_chart(
+                missing,
+                category="field_name",
+                value="n_rejects",
+                title="Missing-field rejects: which field was blank",
+                value_title="Rejected rows",
+                tooltip=[
+                    alt.Tooltip("field_name:N", title="Field"),
+                    alt.Tooltip("n_rejects:Q", title="Rejected rows", format=","),
+                    alt.Tooltip(
+                        "pct_of_missing_rejects:Q",
+                        title="% of missing-field rejects",
+                        format=".2f",
+                    ),
+                ],
+            ),
+            width="stretch",
+        )
+    st.caption(
+        "One rejected row can be missing up to three fields, so the field counts "
+        "add up to more than the number of missing-field rejects."
+    )
+
+    # ---- Live checks on the loaded table ------------------------------------------
+    # The same checks as sql/011_quality_checks.sql, run against claims_clean now.
+    # Every count should be 0; the CHECK constraints from 003 enforce most of them.
+    checks = run_query(
+        """
+        SELECT 'Duplicate claim IDs' AS check_name,
+               (SELECT COUNT(*) FROM (
+                    SELECT claim_id FROM claims_clean
+                    GROUP BY claim_id HAVING COUNT(*) > 1) d) AS n_failing
+        UNION ALL
+        SELECT 'Missing required values',
+               (SELECT COUNT(*) FROM claims_clean
+                WHERE member_id IS NULL OR provider_id IS NULL OR service_date IS NULL
+                   OR billed_amount IS NULL OR allowed_amount IS NULL
+                   OR paid_amount IS NULL)
+        UNION ALL
+        SELECT 'Paid > allowed or allowed > billed',
+               (SELECT COUNT(*) FROM claims_clean
+                WHERE NOT (paid_amount <= allowed_amount AND allowed_amount <= billed_amount))
+        UNION ALL
+        SELECT 'Invalid state codes',
+               (SELECT COUNT(*) FROM claims_clean WHERE member_state !~ '^[A-Z]{2}$')
+        UNION ALL
+        SELECT 'Paid amount on a non-PAID claim',
+               (SELECT COUNT(*) FROM claims_clean
+                WHERE status <> 'PAID' AND paid_amount > 0)
+        UNION ALL
+        SELECT 'Rows without a run_id',
+               (SELECT COUNT(*) FROM claims_clean WHERE run_id IS NULL)
+        """
+    )
+    checks["result"] = [
+        "✅ Pass" if n == 0 else f"❌ {int(n):,} rows" for n in checks["n_failing"]
+    ]
+    st.subheader("Live checks on the loaded claims")
+    show_table(
+        checks[["check_name", "result", "n_failing"]],
+        {
+            "check_name": st.column_config.TextColumn("Check"),
+            "result": st.column_config.TextColumn("Result"),
+            "n_failing": count_column("Failing rows"),
+        },
+    )
+
+    # ---- Run history ---------------------------------------------------------------
+    # TO_CHAR keeps times in the server's local time zone (see render_run_banner).
+    runs = run_query(
+        """
+        SELECT
+            TO_CHAR(started_at, 'YYYY-MM-DD HH24:MI:SS')            AS started,
+            ROUND(EXTRACT(EPOCH FROM finished_at - started_at)::numeric, 2)
+                                                                   AS duration_s,
+            status,
+            raw_rows,
+            clean_rows,
+            rejected_rows,
+            error_message
+        FROM pipeline_runs
+        ORDER BY started_at DESC
+        LIMIT 20
+        """
+    )
+    runs["status"] = [RUN_STATUS_LABELS.get(s, s) for s in runs["status"]]
+    runs["duration_s"] = runs["duration_s"].astype(float)
+    # Successful runs have no error; show an empty cell instead of "None".
+    runs["error_message"] = runs["error_message"].fillna("")
+    st.subheader("Pipeline run history")
+    st.caption("The 20 most recent runs, newest first. FAILED runs loaded no data.")
+    show_table(
+        runs,
+        {
+            "started": st.column_config.TextColumn("Started"),
+            "duration_s": st.column_config.NumberColumn("Duration (s)", format="%.2f"),
+            "status": st.column_config.TextColumn("Status"),
+            "raw_rows": count_column("Raw"),
+            "clean_rows": count_column("Clean"),
+            "rejected_rows": count_column("Rejected"),
+            "error_message": st.column_config.TextColumn("Error", width="large"),
+        },
+    )
+
+
+# -----------------------------------------------------------------
 # Page header: which pipeline run is on screen
 # -----------------------------------------------------------------
 def render_run_banner() -> None:
@@ -916,22 +1305,34 @@ def main() -> None:
     render_run_banner()
     filters = build_sidebar()
 
-    # Stop early if a multiselect was emptied: there is nothing to show,
-    # and "= ANY(empty array)" would match no rows anyway.
-    if not filters.states or not filters.statuses:
-        st.warning("Select at least one member state and one claim status in the sidebar.")
-        st.stop()
-
-    overview_tab, payments_tab, providers_tab = st.tabs(
-        ["Overview", "Payments", "Providers"]
+    # If a multiselect was emptied, the filtered tabs have nothing to show
+    # ("= ANY(empty array)" matches no rows). The Data Quality tab ignores
+    # the filters, so it still renders.
+    filters_ok = bool(filters.states and filters.statuses)
+    empty_filter_message = (
+        "Select at least one member state and one claim status in the sidebar."
     )
 
-    with overview_tab:
-        render_overview(filters)
-    with payments_tab:
-        render_payments(filters)
-    with providers_tab:
-        render_providers(filters)
+    overview_tab, payments_tab, providers_tab, codes_tab, quality_tab = st.tabs(
+        ["Overview", "Payments", "Providers", "Procedures & Diagnoses", "Data Quality"]
+    )
+
+    # (tab, function) pairs for the tabs that use the sidebar filters
+    filtered_tabs = [
+        (overview_tab, render_overview),
+        (payments_tab, render_payments),
+        (providers_tab, render_providers),
+        (codes_tab, render_procedures_diagnoses),
+    ]
+    for tab, render in filtered_tabs:
+        with tab:
+            if filters_ok:
+                render(filters)
+            else:
+                st.warning(empty_filter_message)
+
+    with quality_tab:
+        render_data_quality()
 
 
 if __name__ == "__main__":
