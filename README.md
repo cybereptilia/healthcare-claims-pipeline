@@ -23,7 +23,7 @@ load_to_postgres.py    ->  claims_clean, claims_rejects, pipeline_runs
 010_analytics_views    ->  monthly payments, denial rates, average paid by CPT
 011 / 020              ->  quality checks and summary reports
 012_dashboard_views    ->  views that feed the dashboard
-app/dashboard.py       ->  Streamlit dashboard (in progress)
+app/dashboard.py       ->  Streamlit dashboard (5 tabs)
 ml/                    ->  fraud labels -> features -> model training
 ```
  
@@ -32,7 +32,7 @@ ml/                    ->  fraud labels -> features -> model training
 3. **Load** clean rows and rejects into PostgreSQL in one transaction. Each load is logged in `pipeline_runs` with its row counts and status (`SUCCESS` or `FAILED`), and every loaded row is tagged with its `run_id`.
 4. **Reconcile**: the loader checks that raw rows = clean rows + rejected rows and stops if any row is unaccounted for.
 5. **Enforce** data quality in the database itself with CHECK constraints (valid status, 2-letter state, non-negative amounts, paid ≤ allowed ≤ billed).
-6. **Analyze** with SQL views and report queries.
+6. **Analyze** with SQL views, report queries, and an interactive dashboard (see [Dashboard](#dashboard)).
 7. **Model** fraud with Logistic Regression and Random Forest baselines (see [Fraud Detection](#fraud-detection-in-progress)).
 
 ## Synthetic Data Design
@@ -71,17 +71,40 @@ The script prompts for the Postgres password (or reads `PGPASSWORD`), creates th
  
 > The script expects PostgreSQL at `C:\Program Files\PostgreSQL\18\bin\`. Edit `$psql` and `$createdb` at the top of `run_all.ps1` if yours is elsewhere.
  
-## Dashboard (in progress)
+## Dashboard
 
 An interactive Streamlit dashboard reads the PostgreSQL views directly.
 
+![Dashboard Overview tab: KPI tiles and claims by status and member state](docs/images/dashboard-overview.png)
+
+<details>
+<summary>More screenshots: Payments and Providers tabs</summary>
+
+![Payments tab: paid by month and billed vs. allowed vs. paid by month](docs/images/dashboard-payments.png)
+
+![Providers tab: top 15 providers by denial rate against the overall rate](docs/images/dashboard-providers.png)
+
+</details>
+
+Run the pipeline first, then:
+
 ```powershell
+# Hidden password prompt (the password is not saved in your shell history)
 $env:DB_PASSWORD = [System.Net.NetworkCredential]::new("", (Read-Host "Postgres password" -AsSecureString)).Password
 streamlit run app/dashboard.py
 ```
 
-- **Done:** Overview tab with KPI tiles (claims, billed, allowed, paid, denial rate), claims by status and by member state, and sidebar filters for date range, state, and status.
-- **Planned:** Payments, Providers, Procedures & Diagnoses, and Data Quality tabs.
+| Tab | What it shows |
+|---|---|
+| **Overview** | KPI tiles (claims, billed, allowed, paid, denial rate), claims by status and by member state |
+| **Payments** | Paid by month; billed vs. allowed vs. paid by month; average paid per PAID claim and paid ÷ allowed |
+| **Providers** | Top providers by denial rate (with a minimum-claims slider) and provider volume vs. denial rate |
+| **Procedures & Diagnoses** | Average paid, claim volume, and denial rate by CPT code and by diagnosis |
+| **Data Quality** | Row reconciliation, rejects by reason and by missing field, live checks on the loaded table, and the pipeline run history |
+
+- **Filters:** the sidebar filters (date range, member state, claim status) apply to the first four tabs. Data Quality describes the whole pipeline run and is not filtered.
+- **How it works:** filter values are passed to SQL as bind parameters, never pasted into the query text. Query results are cached for 10 minutes, so after re-running the pipeline use **⋮ → Clear cache** to see the new data.
+- **Readability:** every chart has hover tooltips and a table view with the same numbers, and series are labeled directly, never by color alone.
 
 
 ## Results (current dataset)
@@ -140,11 +163,11 @@ healthcare-claims-pipeline
 │   ├── 003_portfolio_upgrade.sql # pipeline_runs, claims_rejects, constraints
 │   ├── 010_analytics_views.sql   # analytics views
 │   ├── 011_quality_checks.sql    # post-load checks
-│   ├── 012_dashboard_views.sql   # views for the dashboard (in progress)
+│   ├── 012_dashboard_views.sql   # views that feed the dashboard
 │   └── 020_report_queries.sql    # summary reports
 │
 ├── app
-│   └── dashboard.py              # Streamlit dashboard (in progress)
+│   └── dashboard.py              # Streamlit dashboard
 │
 ├── ml
 │   ├── generate_fraud_labels.py
@@ -165,6 +188,7 @@ healthcare-claims-pipeline
 - Transactional loading with rollback on failure
 - PostgreSQL schema design, indexing, and CHECK constraints
 - SQL analytics views with minimum-sample-size filters
+- Interactive dashboard with parameterized, cached SQL queries
 - Imbalanced classification and threshold tuning
 - One-command, fail-fast pipeline automation
 
