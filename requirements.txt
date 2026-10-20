@@ -7,3 +7,8 @@ faker>=25.0
 # ML stage (ml/)
 scikit-learn>=1.4
 matplotlib>=3.8
+
+# Dashboard (app/)
+streamlit>=1.50
+altair>=5.0
+sqlalchemy>=2.0
