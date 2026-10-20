@@ -22,8 +22,8 @@ How to run (from repo root):
     streamlit run app/dashboard.py
 
 Build status:
-    Step 1 (this version): connection, sidebar filters, Overview tab.
-    The other tabs are added in later steps.
+    Done:    connection, sidebar filters, Overview tab, Payments tab.
+    Planned: Providers, Procedures & Diagnoses, and Data Quality tabs.
 """
 
 from __future__ import annotations
@@ -61,6 +61,17 @@ QUERY_CACHE_SECONDS: int = 600
 # so color carries no meaning by itself; titles and axis labels name what is
 # shown. (Blue slot 1 of the reference palette; readable on light and dark.)
 ACCENT_COLOR: str = "#2a78d6"
+
+# Colors for charts that compare billed / allowed / paid on one shared $ axis.
+# Fixed order (blue, orange, aqua = slots 1-3 of the reference palette), so
+# each measure keeps its color in every chart. Light and dark mode use the
+# same hues stepped for each background; both sets were checked with the
+# palette validator (colorblind separation and contrast). In light mode the
+# aqua line is below 3:1 contrast, so those charts also carry direct labels
+# and a table view, and never rely on color alone.
+AMOUNT_SERIES: list[str] = ["Billed", "Allowed", "Paid"]
+AMOUNT_COLORS_LIGHT: list[str] = ["#2a78d6", "#eb6834", "#1baf7a"]
+AMOUNT_COLORS_DARK: list[str] = ["#3987e5", "#d95926", "#199e70"]
 
 # Note on dollar signs: Streamlit treats text between two "$" signs as a math
 # formula in st.markdown / st.caption, so dollar amounts in those calls are
@@ -263,6 +274,167 @@ def format_money(amount: float) -> str:
     return f"${amount:,.0f}"
 
 
+def amount_colors() -> list[str]:
+    """
+    Pick the light or dark set of billed/allowed/paid colors to match the
+    viewer's Streamlit theme (st.context.theme reports "light" or "dark").
+    Falls back to the light set if the theme is unknown.
+    """
+    theme_type = getattr(st.context.theme, "type", None)
+    return AMOUNT_COLORS_DARK if theme_type == "dark" else AMOUNT_COLORS_LIGHT
+
+
+# Column formats for st.dataframe tables, so every table in the app shows
+# readable headers and consistent number formats instead of raw column names.
+def money_column(label: str) -> Any:
+    """Dollar amounts with thousands separators: $1,234.56"""
+    return st.column_config.NumberColumn(label, format="dollar")
+
+
+def count_column(label: str) -> Any:
+    """Whole numbers with thousands separators: 17,323"""
+    return st.column_config.NumberColumn(label, format="localized")
+
+
+def pct_column(label: str) -> Any:
+    """Percentages stored as 0-100 values (not 0-1): 13.09%"""
+    return st.column_config.NumberColumn(label, format="%.2f%%")
+
+
+def show_table(df: pd.DataFrame, columns: dict[str, Any]) -> None:
+    """
+    Show a DataFrame as a table with friendly headers and number formats.
+    Columns not listed in `columns` keep their default display.
+    """
+    st.dataframe(df, hide_index=True, width="stretch", column_config=columns)
+
+
+def month_axis() -> alt.Axis:
+    """
+    Shared x-axis for monthly charts: one tick per month, labeled "Oct 25".
+    """
+    return alt.Axis(
+        format="%b %y",
+        labelAngle=0,
+        tickCount=alt.TimeIntervalStep(interval="month", step=1),
+        grid=False,
+    )
+
+
+def single_line_chart(
+    df: pd.DataFrame,
+    value: str,
+    title: str,
+    value_title: str,
+) -> alt.LayerChart:
+    """
+    One measure over time: a 2px line with a point on each month.
+
+    Hover: a vertical hairline snaps to the nearest month and shows its
+    tooltip, so the reader does not have to hit the small point exactly.
+    Expects a "month" column of datetimes.
+    """
+    nearest = alt.selection_point(
+        nearest=True, on="pointerover", fields=["month"], empty=False
+    )
+    base = alt.Chart(df).encode(x=alt.X("month:T", title=None, axis=month_axis()))
+    y = alt.Y(f"{value}:Q", title=value_title, axis=alt.Axis(format="$,.0f", tickCount=5))
+
+    line = base.mark_line(color=ACCENT_COLOR, strokeWidth=2).encode(y=y)
+    points = base.mark_point(color=ACCENT_COLOR, filled=True, size=64).encode(y=y)
+    # Invisible full-height rules catch the pointer; the hovered one is shown.
+    hover_rule = (
+        base.mark_rule(color="gray", strokeWidth=1)
+        .encode(
+            opacity=alt.condition(nearest, alt.value(0.6), alt.value(0)),
+            tooltip=[
+                alt.Tooltip("month:T", title="Month", format="%B %Y"),
+                alt.Tooltip(f"{value}:Q", title=value_title, format="$,.2f"),
+            ],
+        )
+        .add_params(nearest)
+    )
+    return (
+        # alt.LayerChart(...) instead of alt.layer(...): same chart, but the
+        # type checker then knows the result is a LayerChart.
+        alt.LayerChart(layer=[line, points, hover_rule], title=title)
+        .properties(height=280)
+        .configure_axis(gridOpacity=0.3, domain=False, tickColor="transparent")
+        .configure_view(stroke=None)
+    )
+
+
+def amounts_line_chart(df: pd.DataFrame, title: str) -> alt.LayerChart:
+    """
+    Billed, allowed, and paid per month as three lines on ONE shared $ axis.
+
+    One axis is correct here because all three are the same unit (dollars);
+    two different units would need two charts instead of a second y-axis.
+    Identity is never color alone: there is a legend AND each line is
+    labeled at its last month.
+
+    Expects a "month" column plus total_billed / total_allowed / total_paid.
+    """
+    # Long format: one row per (month, measure) so Altair can color by measure.
+    long_df = df.melt(
+        id_vars="month",
+        value_vars=["total_billed", "total_allowed", "total_paid"],
+        var_name="measure",
+        value_name="amount",
+    )
+    long_df["measure"] = long_df["measure"].map(
+        {"total_billed": "Billed", "total_allowed": "Allowed", "total_paid": "Paid"}
+    )
+
+    color = alt.Color(
+        "measure:N",
+        scale=alt.Scale(domain=AMOUNT_SERIES, range=amount_colors()),
+        legend=alt.Legend(title=None, orient="top"),
+        sort=AMOUNT_SERIES,
+    )
+    x = alt.X("month:T", title=None, axis=month_axis())
+    y = alt.Y("amount:Q", title="Amount ($)", axis=alt.Axis(format="$,.0f", tickCount=5))
+
+    lines = alt.Chart(long_df).mark_line(strokeWidth=2).encode(x=x, y=y, color=color)
+    points = alt.Chart(long_df).mark_point(filled=True, size=48).encode(x=x, y=y, color=color)
+
+    # Direct labels: the measure name just right of each line's last point.
+    # Text uses a neutral gray (readable on light and dark), not the line
+    # color: the colored point right next to it already carries identity.
+    last_month = long_df["month"].max()
+    end_labels = (
+        alt.Chart(long_df[long_df["month"] == last_month])
+        .mark_text(align="left", dx=8, fontSize=12, color="#83858f")
+        .encode(x=x, y=y, text="measure:N")
+    )
+
+    # One hover rule per month (from the wide table) shows all three values.
+    nearest = alt.selection_point(
+        nearest=True, on="pointerover", fields=["month"], empty=False
+    )
+    hover_rule = (
+        alt.Chart(df)
+        .mark_rule(color="gray", strokeWidth=1)
+        .encode(
+            x=x,
+            opacity=alt.condition(nearest, alt.value(0.6), alt.value(0)),
+            tooltip=[
+                alt.Tooltip("month:T", title="Month", format="%B %Y"),
+                alt.Tooltip("total_billed:Q", title="Billed", format="$,.2f"),
+                alt.Tooltip("total_allowed:Q", title="Allowed", format="$,.2f"),
+                alt.Tooltip("total_paid:Q", title="Paid", format="$,.2f"),
+            ],
+        )
+        .add_params(nearest)
+    )
+    return (
+        alt.LayerChart(layer=[lines, points, end_labels, hover_rule], title=title)
+        .properties(height=320, padding={"right": 60})
+        .configure_axis(gridOpacity=0.3, domain=False, tickColor="transparent")
+        .configure_view(stroke=None)
+    )
+
+
 def bar_chart(
     df: pd.DataFrame,
     category: str,
@@ -404,15 +576,123 @@ def render_overview(filters: Filters) -> None:
 
     # ---- Table view (accessibility: the same numbers without the chart) ---------
     with st.expander("Show the numbers as a table"):
-        st.dataframe(
+        show_table(
             status_mix.sort_values("n_claims", ascending=False),
-            hide_index=True,
-            width="stretch",
+            {
+                "status": st.column_config.TextColumn("Status"),
+                "n_claims": count_column("Claims"),
+                "pct_of_claims": pct_column("% of claims"),
+            },
         )
-        st.dataframe(
+        show_table(
             state_mix.sort_values("n_claims", ascending=False),
-            hide_index=True,
-            width="stretch",
+            {
+                "member_state": st.column_config.TextColumn("Member state"),
+                "n_claims": count_column("Claims"),
+                "pct_of_claims": pct_column("% of claims"),
+                "total_paid": money_column("Paid"),
+            },
+        )
+
+
+# -----------------------------------------------------------------
+# Tab: Payments
+# -----------------------------------------------------------------
+def render_payments(filters: Filters) -> None:
+    """
+    Money over time for the filtered claims: paid by month, and billed vs.
+    allowed vs. paid by month, plus the monthly table behind both charts.
+    """
+    where, params = filter_clause(filters)
+
+    monthly = run_query(
+        f"""
+        SELECT
+            service_month                           AS month,
+            COUNT(*)                                AS n_claims,
+            COUNT(*) FILTER (WHERE status = 'PAID') AS n_paid_claims,
+            SUM(billed_amount)                      AS total_billed,
+            SUM(allowed_amount)                     AS total_allowed,
+            SUM(paid_amount)                        AS total_paid
+        FROM v_claims_base
+        {where}
+        GROUP BY service_month
+        ORDER BY service_month
+        """,
+        params,
+    )
+    if monthly.empty:
+        st.warning("No claims match the current filters.")
+        return
+
+    # psycopg2 returns DATE values as Python dates; Altair needs datetimes.
+    monthly["month"] = pd.to_datetime(monthly["month"])
+    # NUMERIC sums arrive as Decimal; convert to float for charts and math.
+    for col in ["total_billed", "total_allowed", "total_paid"]:
+        monthly[col] = monthly[col].astype(float)
+
+    total_paid = float(monthly["total_paid"].sum())
+    total_allowed = float(monthly["total_allowed"].sum())
+    n_paid_claims = int(monthly["n_paid_claims"].sum())
+    n_months = len(monthly)
+
+    # ---- KPI row -------------------------------------------------------------
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Paid", format_money(total_paid))
+    col2.metric("Average paid per month", format_money(total_paid / n_months))
+    col3.metric(
+        "Average paid per PAID claim",
+        format_money(total_paid / n_paid_claims) if n_paid_claims else "n/a",
+    )
+    col4.metric(
+        "Paid ÷ allowed",
+        f"{total_paid / total_allowed * 100:.1f}%" if total_allowed else "n/a",
+    )
+    st.caption(
+        "Only PAID claims have a paid amount; DENIED, PENDED, and REVERSED claims "
+        "count toward billed and allowed but are paid \\$0."
+    )
+
+    # Partial-month warning: a date filter that starts or ends mid-month makes
+    # that month's totals look low even if nothing changed in the business.
+    month_end = (pd.Timestamp(filters.end_date) + pd.offsets.MonthEnd(0)).date()
+    if filters.start_date.day != 1 or filters.end_date != month_end:
+        st.info(
+            "The date filter starts or ends in the middle of a month, so the "
+            "first or last month only includes part of that month."
+        )
+
+    # ---- Charts ------------------------------------------------------------------
+    st.altair_chart(
+        single_line_chart(
+            monthly, value="total_paid", title="Paid by month", value_title="Paid"
+        ),
+        width="stretch",
+    )
+    st.altair_chart(
+        amounts_line_chart(monthly, title="Billed, allowed, and paid by month"),
+        width="stretch",
+    )
+
+    # ---- Table view ------------------------------------------------------------
+    with st.expander("Show the numbers as a table"):
+        table = monthly.copy()
+        table["paid_pct_of_allowed"] = (
+            100 * table["total_paid"] / table["total_allowed"]
+        ).round(2)
+        show_table(
+            table[
+                ["month", "n_claims", "total_billed", "total_allowed",
+                 "total_paid", "paid_pct_of_allowed"]
+            ],
+            {
+                "month": st.column_config.DateColumn("Month", format="MMM YYYY"),
+                "n_claims": count_column("Claims"),
+                "total_billed": money_column("Billed"),
+                "total_allowed": money_column("Allowed"),
+                "total_paid": money_column("Paid"),
+                "paid_pct_of_allowed": pct_column("Paid ÷ allowed"),
+            },
         )
 
 
@@ -464,10 +744,12 @@ def main() -> None:
         st.warning("Select at least one member state and one claim status in the sidebar.")
         st.stop()
 
-    (overview_tab,) = st.tabs(["Overview"])
+    overview_tab, payments_tab = st.tabs(["Overview", "Payments"])
 
     with overview_tab:
         render_overview(filters)
+    with payments_tab:
+        render_payments(filters)
 
 
 if __name__ == "__main__":
