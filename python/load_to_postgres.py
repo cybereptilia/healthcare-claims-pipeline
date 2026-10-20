@@ -241,7 +241,7 @@ def finish_run(cur: PgCursor, run_id: str, raw_rows: int, clean_rows: int, rejec
     cur.execute(
         """
         UPDATE pipeline_runs
-        SET finished_at     = now(),
+        SET finished_at     = clock_timestamp(),
             raw_rows        = %s,
             clean_rows      = %s,
             rejected_rows   = %s,
@@ -261,7 +261,7 @@ def fail_run(conn: PgConnection, run_id: str, error_message: str) -> None:
         cur.execute(
             """
             UPDATE pipeline_runs
-            SET finished_at     = now(),
+            SET finished_at     = clock_timestamp(),
                 status          = 'FAILED',
                 error_message   = %s
             WHERE run_id = %s::uuid;

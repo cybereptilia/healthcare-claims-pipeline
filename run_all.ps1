@@ -3,23 +3,24 @@
 # Execute the full healthcare claims pipeline from end to end.
 
 # What this script does:
-# 1) Ensures the target PostgreSQL database exists
-# 2) Builds the schema (001)
-# 3) Creates indexes (002)
-# 4) Adds run logging, the rejects table, and data quality constraints (003)
-# 5) Generates raw synthetic claims data
-# 6) Cleans and validates that data 
-# 7) Load clean data + rejects into PostgreSQL and logs the run
-# 8) Creates analytics views
-# 9) Runs quality checks
-# 10) Runs report queries 
-# 11) Generates synthetic fraud labels      (ML stage, skip with -SkipML)
-# 12) Builds model-ready features           (ML stage, skip with -SkipML)
-# 13) Trains and evaluates the fraud models (ML stage, skip with _skipML)
+# 1)  Ensures the target PostgreSQL database exists
+# 2)  Builds the schema (001)
+# 3)  Creates indexes (002)
+# 4)  Adds run logging, the rejects table, and data quality constraints (003)
+# 5)  Generates raw synthetic claims data
+# 6)  Cleans and validates that data
+# 7)  Loads clean data + rejects into PostgreSQL and logs the run
+# 8)  Creates analytics views (010)
+# 9)  Creates dashboard views (012)
+# 10) Runs quality checks
+# 11) Runs report queries
+# 12) Generates synthetic fraud labels      (ML stage, skip with -SkipML)
+# 13) Builds model-ready features           (ML stage, skip with -SkipML)
+# 14) Trains and evaluates the fraud models (ML stage, skip with -SkipML)
 
 # How to run:
 # .\run_all.ps1             # full pipeline, including the ML stage
-# .\run_all.ps1 -SkipML     # data pipeline only (steps 1-10)
+# .\run_all.ps1 -SkipML     # data pipeline only (steps 1-11)
 
 # Notes: 
 # - This script assumes PostgreSQL is installed in the default path below.
@@ -29,7 +30,7 @@
 
 # Script parameters (must come before any other statement in the script).
 param(
-    # Use -SkipML to stop after the data pipeline (steps 1-10).
+    # Use -SkipML to stop after the data pipeline (steps 1-11).
     [switch]$SkipML
 )
 
@@ -95,7 +96,7 @@ try {
         & $createdb -U $dbUser $dbName
 
         # stop the pipeline if createdb failed (non-zero exit code)
-        Assert-StepSucceeded "Create database"
+        Assert-StepSucceeded "Step 1: Create database"
 
         Write-Host "[OK] Database created: $dbName"
     }
@@ -144,7 +145,7 @@ try {
     Assert-StepSucceeded "Step 5: Generate raw data"
     Write-Host "[OK] Raw data generation complete."
  
-   # ----------------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------------
     # Step 6: Clean raw data and write clean + rejects CSVs
     # ----------------------------------------------------------------------------------
     Write-Host ""
@@ -174,30 +175,43 @@ try {
     & $psql -U $dbUser -d $dbName -v ON_ERROR_STOP=1 -f ".\sql\010_analytics_views.sql"
     Assert-StepSucceeded "Step 8: Create analytics views"
     Write-Host "[OK] Analytics views created."
+
+    # -----------------------------------------------------------------------------------
+    # Step 9: Create dashboard views
+    # -----------------------------------------------------------------------------------
+    # Must run AFTER the load (Step 7): v_latest_run and the reject views read
+    # pipeline_runs and claims_rejects, which the loader fills.
+
+    Write-Host ""
+    Write-Host "=== STEP 9: Create dashboard views ==="
+
+    & $psql -U $dbUser -d $dbName -v ON_ERROR_STOP=1 -f ".\sql\012_dashboard_views.sql"
+    Assert-StepSucceeded "Step 9: Create dashboard views"
+    Write-Host "[OK] Dashboard views created."
  
     # -----------------------------------------------------------------------------------
-    # Step 9: Run quality checks
+    # Step 10: Run quality checks
     # -----------------------------------------------------------------------------------
  
     Write-Host ""
-    Write-Host "=== STEP 9: Run quality checks ==="
+    Write-Host "=== STEP 10: Run quality checks ==="
  
     & $psql -U $dbUser -d $dbName -v ON_ERROR_STOP=1 -f ".\sql\011_quality_checks.sql"
-    Assert-StepSucceeded "Step 9: Run quality checks"
+    Assert-StepSucceeded "Step 10: Run quality checks"
     Write-Host "[OK] Quality checks executed."
     # ------------------------------------------------------------------------------------
-    # Step 10: Run report queries
+    # Step 11: Run report queries
     # ------------------------------------------------------------------------------------
  
     Write-Host ""
-    Write-Host "=== STEP 10: Run report queries ==="
+    Write-Host "=== STEP 11: Run report queries ==="
  
     & $psql -U $dbUser -d $dbName -v ON_ERROR_STOP=1 -f ".\sql\020_report_queries.sql"
-    Assert-StepSucceeded "Step 10: Run report queries"
+    Assert-StepSucceeded "Step 11: Run report queries"
     Write-Host "[OK] Report queries executed."
  
     # ------------------------------------------------------------------------------------
-    # ML stage (Steps 11-13): skipped when the script is run with -SkipML
+    # ML stage (Steps 12-14): skipped when the script is run with -SkipML
     # ------------------------------------------------------------------------------------
     if ($SkipML) {
         Write-Host ""
@@ -205,33 +219,33 @@ try {
     }
     else {
         # --------------------------------------------------------------------------------
-        # Step 11: Generate synthetic fraud labels
+        # Step 12: Generate synthetic fraud labels
         # --------------------------------------------------------------------------------
         Write-Host ""
-        Write-Host "=== STEP 11: Generate fraud labels ==="
+        Write-Host "=== STEP 12: Generate fraud labels ==="
  
         python -u .\ml\generate_fraud_labels.py
-        Assert-StepSucceeded "Step 11: Generate fraud labels"
+        Assert-StepSucceeded "Step 12: Generate fraud labels"
         Write-Host "[OK] Fraud labels generated."
  
         # --------------------------------------------------------------------------------
-        # Step 12: Build model-ready features
+        # Step 13: Build model-ready features
         # --------------------------------------------------------------------------------
         Write-Host ""
-        Write-Host "=== STEP 12: Build model features ==="
+        Write-Host "=== STEP 13: Build model features ==="
  
         python -u .\ml\feature_engineering.py
-        Assert-StepSucceeded "Step 12: Build model features"
+        Assert-StepSucceeded "Step 13: Build model features"
         Write-Host "[OK] Feature dataset written."
  
         # --------------------------------------------------------------------------------
-        # Step 13: Train and evaluate fraud models (writes charts to ml\artifacts)
+        # Step 14: Train and evaluate fraud models (writes charts to ml\artifacts)
         # --------------------------------------------------------------------------------
         Write-Host ""
-        Write-Host "=== STEP 13: Train and evaluate fraud models ==="
+        Write-Host "=== STEP 14: Train and evaluate fraud models ==="
  
         python -u .\ml\train_fraud_model.py
-        Assert-StepSucceeded "Step 13: Train and evaluate fraud models"
+        Assert-StepSucceeded "Step 14: Train and evaluate fraud models"
         Write-Host "[OK] Model training and evaluation complete."
     }
  

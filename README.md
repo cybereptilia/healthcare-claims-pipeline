@@ -116,6 +116,7 @@ healthcare-claims-pipeline
 │   ├── 003_portfolio_upgrade.sql # pipeline_runs, claims_rejects, constraints
 │   ├── 010_analytics_views.sql   # analytics views
 │   ├── 011_quality_checks.sql    # post-load checks
+|   ├── 012_dashboard_views.sql   # views for the dashboard (in progress)
 │   └── 020_report_queries.sql    # summary reports
 │
 ├── ml
