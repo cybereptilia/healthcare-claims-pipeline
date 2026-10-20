@@ -22,8 +22,8 @@ How to run (from repo root):
     streamlit run app/dashboard.py
 
 Build status:
-    Done:    connection, sidebar filters, Overview tab, Payments tab.
-    Planned: Providers, Procedures & Diagnoses, and Data Quality tabs.
+    Done:    connection, sidebar filters, Overview, Payments, and Providers tabs.
+    Planned: Procedures & Diagnoses and Data Quality tabs.
 """
 
 from __future__ import annotations
@@ -61,6 +61,13 @@ QUERY_CACHE_SECONDS: int = 600
 # so color carries no meaning by itself; titles and axis labels name what is
 # shown. (Blue slot 1 of the reference palette; readable on light and dark.)
 ACCENT_COLOR: str = "#2a78d6"
+
+# Neutral gray for reference lines and their labels (e.g. "Overall 13.09%").
+# Readable on both light and dark backgrounds, and clearly not a data series.
+REFERENCE_COLOR: str = "#83858f"
+
+# Providers tab: denial rate at or above this counts as "high-denial".
+HIGH_DENIAL_THRESHOLD_PCT: float = 20.0
 
 # Colors for charts that compare billed / allowed / paid on one shared $ axis.
 # Fixed order (blue, orange, aqua = slots 1-3 of the reference palette), so
@@ -435,6 +442,23 @@ def amounts_line_chart(df: pd.DataFrame, title: str) -> alt.LayerChart:
     )
 
 
+def reference_rule(value: float, axis: str) -> alt.Chart:
+    """
+    Dashed gray reference line at `value`, e.g. the overall denial rate.
+
+    axis="x" draws a vertical line (for horizontal bar charts);
+    axis="y" draws a horizontal line (for scatter / line charts).
+    The line is explained in a caption under the chart rather than with an
+    on-chart label, so the label can never overlap a bar or a dot.
+    """
+    line = alt.Chart(pd.DataFrame({"ref": [value]})).mark_rule(
+        color=REFERENCE_COLOR, strokeDash=[4, 4], strokeWidth=1.5
+    )
+    if axis == "x":
+        return line.encode(x="ref:Q")
+    return line.encode(y="ref:Q")
+
+
 def bar_chart(
     df: pd.DataFrame,
     category: str,
@@ -697,6 +721,160 @@ def render_payments(filters: Filters) -> None:
 
 
 # -----------------------------------------------------------------
+# Tab: Providers
+# -----------------------------------------------------------------
+def render_providers(filters: Filters) -> None:
+    """
+    Denial rate per provider for the filtered claims.
+
+    A minimum-claims slider hides providers with too few claims: with 5
+    claims, a single denial is already a 20% denial rate, so small providers
+    would crowd the top of the ranking by chance.
+    """
+    where, params = filter_clause(filters)
+
+    # The denial rate is DENIED claims / claims in the selected statuses.
+    # Without DENIED in the status filter, every rate would be 0%.
+    if "DENIED" not in filters.statuses:
+        st.info("Add DENIED to the claim status filter to see provider denial rates.")
+        return
+
+    min_claims = st.slider(
+        "Minimum claims per provider",
+        min_value=1,
+        max_value=100,
+        value=20,
+        step=1,
+        help="Providers with fewer claims (after the sidebar filters) are hidden.",
+    )
+
+    # Overall denial rate across ALL filtered claims (every provider, before the
+    # minimum-claims cut), used as the reference line in both charts.
+    overall = run_query(
+        f"SELECT 100.0 * AVG(is_denied) AS denial_rate_pct FROM v_claims_base {where}",
+        params,
+    )
+    # .iloc[0] gives the first row as a Series; ["col"] then reads one value.
+    # "or 0" covers NULL (no matching claims), which AVG returns as None.
+    overall_rate = float(overall.iloc[0]["denial_rate_pct"] or 0)
+
+    providers = run_query(
+        f"""
+        SELECT
+            provider_id,
+            COUNT(*)              AS n_claims,
+            SUM(is_denied)        AS n_denied,
+            100.0 * AVG(is_denied) AS denial_rate_pct,
+            SUM(paid_amount)      AS total_paid
+        FROM v_claims_base
+        {where}
+        GROUP BY provider_id
+        HAVING COUNT(*) >= :min_claims
+        """,
+        {**params, "min_claims": min_claims},
+    )
+    if providers.empty:
+        st.warning(
+            "No provider has that many claims with the current filters. "
+            "Lower the minimum or widen the filters."
+        )
+        return
+
+    # NUMERIC values arrive as Decimal; convert for charts and math.
+    providers["denial_rate_pct"] = providers["denial_rate_pct"].astype(float).round(2)
+    providers["total_paid"] = providers["total_paid"].astype(float)
+    providers["pp_vs_overall"] = (providers["denial_rate_pct"] - overall_rate).round(2)
+    providers = providers.sort_values(
+        ["denial_rate_pct", "n_claims"], ascending=[False, False]
+    )
+
+    n_high = int((providers["denial_rate_pct"] >= HIGH_DENIAL_THRESHOLD_PCT).sum())
+
+    # ---- KPI row -------------------------------------------------------------
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Providers shown", f"{len(providers):,}")
+    col2.metric("Overall denial rate", f"{overall_rate:.2f}%")
+    col3.metric(f"Providers at {HIGH_DENIAL_THRESHOLD_PCT:.0f}%+ denial", f"{n_high:,}")
+    col4.metric("Highest denial rate", f"{providers['denial_rate_pct'].iloc[0]:.2f}%")
+
+    # ---- Chart 1: top providers by denial rate ---------------------------------
+    top = providers.head(15)
+    tooltip = [
+        alt.Tooltip("provider_id:N", title="Provider"),
+        alt.Tooltip("n_claims:Q", title="Claims", format=","),
+        alt.Tooltip("n_denied:Q", title="Denied", format=","),
+        alt.Tooltip("denial_rate_pct:Q", title="Denial rate (%)", format=".2f"),
+    ]
+    bars = (
+        alt.Chart(top)
+        .mark_bar(color=ACCENT_COLOR, cornerRadiusEnd=4, size=16)
+        .encode(
+            x=alt.X("denial_rate_pct:Q", title="Denial rate (%)",
+                    axis=alt.Axis(tickCount=5)),
+            y=alt.Y("provider_id:N", sort="-x", title=None),
+            tooltip=tooltip,
+        )
+    )
+    st.altair_chart(
+        alt.LayerChart(
+            layer=[bars, reference_rule(overall_rate, axis="x")],
+            title=f"Top {len(top)} providers by denial rate (min. {min_claims} claims)",
+        )
+        .properties(height=alt.Step(24))
+        .configure_axis(gridOpacity=0.3, domain=False, tickColor="transparent")
+        .configure_view(stroke=None),
+        width="stretch",
+    )
+
+    # ---- Chart 2: volume vs. denial rate ---------------------------------------
+    dots = (
+        alt.Chart(providers)
+        .mark_circle(color=ACCENT_COLOR, size=64, opacity=0.55)
+        .encode(
+            x=alt.X("n_claims:Q", title="Claims (provider volume)",
+                    axis=alt.Axis(tickCount=6)),
+            y=alt.Y("denial_rate_pct:Q", title="Denial rate (%)",
+                    axis=alt.Axis(tickCount=5)),
+            tooltip=tooltip,
+        )
+    )
+    st.altair_chart(
+        alt.LayerChart(
+            layer=[dots, reference_rule(overall_rate, axis="y")],
+            title="Provider volume vs. denial rate",
+        )
+        .properties(height=320)
+        .configure_axis(gridOpacity=0.3, domain=False, tickColor="transparent")
+        .configure_view(stroke=None),
+        width="stretch",
+    )
+    st.caption(
+        f"Each dot is one provider. The dashed line in both charts is the overall "
+        f"denial rate for the selected claims ({overall_rate:.2f}%); providers far "
+        f"above it deny claims much more often than the network as a whole."
+    )
+
+    # ---- Table view ------------------------------------------------------------
+    with st.expander("Show all providers as a table"):
+        show_table(
+            providers[
+                ["provider_id", "n_claims", "n_denied", "denial_rate_pct",
+                 "pp_vs_overall", "total_paid"]
+            ],
+            {
+                "provider_id": st.column_config.TextColumn("Provider"),
+                "n_claims": count_column("Claims"),
+                "n_denied": count_column("Denied"),
+                "denial_rate_pct": pct_column("Denial rate"),
+                "pp_vs_overall": st.column_config.NumberColumn(
+                    "vs. overall (pts)", format="%+.2f"
+                ),
+                "total_paid": money_column("Paid"),
+            },
+        )
+
+
+# -----------------------------------------------------------------
 # Page header: which pipeline run is on screen
 # -----------------------------------------------------------------
 def render_run_banner() -> None:
@@ -744,12 +922,16 @@ def main() -> None:
         st.warning("Select at least one member state and one claim status in the sidebar.")
         st.stop()
 
-    overview_tab, payments_tab = st.tabs(["Overview", "Payments"])
+    overview_tab, payments_tab, providers_tab = st.tabs(
+        ["Overview", "Payments", "Providers"]
+    )
 
     with overview_tab:
         render_overview(filters)
     with payments_tab:
         render_payments(filters)
+    with providers_tab:
+        render_providers(filters)
 
 
 if __name__ == "__main__":
